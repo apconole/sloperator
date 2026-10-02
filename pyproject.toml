@@ -49,6 +49,9 @@ Repository = "https://github.com/aconole/sloperator"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"sloperator.database.migrations" = ["*.sql"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
