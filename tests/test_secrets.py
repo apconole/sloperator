@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sloperator.config import SecretError, SecretStore
+from sloperator.security.redaction import REDACTED, redact_text
 
 
 def test_get_returns_value(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,3 +35,9 @@ def test_error_message_does_not_leak_value() -> None:
     with pytest.raises(SecretError) as excinfo:
         SecretStore(environ={"X": ""}).get("X")
     assert "s3cret" not in str(excinfo.value)
+
+
+def test_get_registers_value_for_redaction() -> None:
+    store = SecretStore(environ={"X": "topsecret"})
+    assert store.get("X") == "topsecret"
+    assert redact_text("leaked topsecret value") == f"leaked {REDACTED} value"

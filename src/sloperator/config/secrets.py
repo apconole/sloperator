@@ -11,6 +11,7 @@ import os
 from collections.abc import Mapping
 
 from sloperator.config.errors import SecretError
+from sloperator.security.redaction import register_secret
 
 
 class SecretStore:
@@ -20,13 +21,18 @@ class SecretStore:
         self._environ: Mapping[str, str] = os.environ if environ is None else environ
 
     def get(self, name: str) -> str:
-        """Return the value of a required secret, or raise SecretError."""
+        """Return the value of a required secret, or raise SecretError.
+
+        Resolved values are registered with the redaction module so that
+        accidental log or audit output masks them automatically.
+        """
         try:
             value = self._environ[name]
         except KeyError:
             raise SecretError(f"required environment variable {name!r} is not set") from None
         if not value:
             raise SecretError(f"environment variable {name!r} is set but empty")
+        register_secret(value)
         return value
 
     def get_optional(self, name: str | None) -> str | None:
