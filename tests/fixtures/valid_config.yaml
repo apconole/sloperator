@@ -1,0 +1,117 @@
+application:
+  name: sloperator
+
+paths:
+  database: /var/lib/sloperator/database
+  state: /var/lib/sloperator/state
+  cache: /var/lib/sloperator/cache
+  artifacts: /var/lib/sloperator/artifacts
+  workspaces: /var/lib/sloperator/workspaces
+  logs: /var/log/sloperator
+
+database:
+  engine: sqlite
+  filename: sloperator.db
+
+sources:
+  - id: project-mbox
+    type: mbox
+    project: example
+    path: /archives/example.mbox
+  - id: project-nntp
+    type: nntp
+    project: example
+    server: news.example.org
+    port: 563
+    tls: true
+    group: example.project.list
+    password_env: SLOP_NNTP_PASSWORD
+  - id: project-archive
+    type: pipermail
+    project: example
+    base_url: https://lists.example.org/pipermail/example/
+  - id: project-github
+    type: github
+    project: example
+    repository: example/project
+    api_token_env: SLOP_GITHUB_TOKEN
+
+projects:
+  example:
+    name: Example Project
+    description: A demo project
+    sources:
+      - project-mbox
+      - project-nntp
+      - project-archive
+      - project-github
+    repository: example-repo
+    roles:
+      conversation-analyst: qwen27b
+
+repositories:
+  example-repo:
+    path: /srv/git/example.git
+    kind: bare
+    default_branch: main
+
+principals:
+  - id: primary
+    name: Jane Maintainer
+    email: jane@example.org
+
+roles:
+  triage:
+    description: Classify incoming events and identify state changes.
+    backend: flash
+  conversation-analyst:
+    description: Reconstruct discussions and identify requests and decisions.
+    backend: gpt-oss
+    fallback_backend: flash
+  senior-maintainer:
+    description: Produce a maintainer-facing assessment and proposed plan.
+    backend: qwen27b
+
+backends:
+  flash:
+    type: openai_compatible
+    base_url: http://flash.local:8080/v1
+    model: qwen3.8-flash
+    max_concurrency: 8
+  gpt-oss:
+    type: openai_compatible
+    base_url: http://gpt-oss.local:8080/v1
+    model: gpt-oss-20b
+    max_concurrency: 2
+  qwen27b:
+    type: openai_compatible
+    base_url: http://qwen27b.local:8080/v1
+    model: qwen3.8-27b
+    max_concurrency: 1
+
+routing:
+  role_backends: {}
+
+scheduling:
+  daemon_poll_interval_seconds: 30
+  max_concurrent_tasks: 4
+
+notifications:
+  enabled: true
+  min_urgency: INFO
+
+security:
+  network_allowlist:
+    - news.example.org
+    - lists.example.org
+    - github.com
+    - "*.local"
+
+workspaces:
+  example:
+    source_repo: /srv/git/example.git
+    allow_agent_modification: true
+
+logging:
+  level: INFO
+  json_format: true
