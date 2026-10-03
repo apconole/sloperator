@@ -292,3 +292,64 @@ class ThreadDao:
                 (thread_id,),
             ).fetchall()
         )
+
+
+class PatchSeriesDao:
+    @staticmethod
+    def clear_project(conn: sqlite3.Connection, project_id: str) -> None:
+        conn.execute(
+            "DELETE FROM patches WHERE series_id IN "
+            "(SELECT id FROM patch_series WHERE project_id = ?)",
+            (project_id,),
+        )
+        conn.execute("DELETE FROM patch_series WHERE project_id = ?", (project_id,))
+
+    @staticmethod
+    def insert(
+        conn: sqlite3.Connection,
+        *,
+        project_id: str,
+        title: str,
+        latest_version: int,
+        created_at: datetime,
+    ) -> int:
+        cur = conn.execute(
+            """INSERT INTO patch_series (
+                   project_id, title, latest_version, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?)""",
+            (project_id, title, latest_version, to_db_time(created_at), to_db_time(created_at)),
+        )
+        row_id = cur.lastrowid
+        assert row_id is not None
+        return int(row_id)
+
+    @staticmethod
+    def set_latest_version(
+        conn: sqlite3.Connection, series_id: int, version: int, at: datetime
+    ) -> None:
+        conn.execute(
+            "UPDATE patch_series SET latest_version = ?, updated_at = ? WHERE id = ?",
+            (version, to_db_time(at), series_id),
+        )
+
+
+class PatchDao:
+    @staticmethod
+    def upsert(
+        conn: sqlite3.Connection,
+        *,
+        series_id: int,
+        event_id: str | None,
+        version: int,
+        position: int,
+        total: int | None,
+        subject: str,
+        content_hash: str | None,
+    ) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO patches (
+                   series_id, event_id, version, position, total,
+                   subject, content_hash
+               ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (series_id, event_id, version, position, total, subject, content_hash),
+        )
