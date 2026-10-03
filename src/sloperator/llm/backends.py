@@ -37,6 +37,7 @@ class StructuredOutputError(LlmError):
 class LlmRequest:
     system: str
     user: str
+    model: str | None = None
     temperature: float | None = None
     max_output_tokens: int | None = None
 
@@ -103,7 +104,7 @@ class OpenAICompatibleBackend:
 
     def _payload(self, request: LlmRequest, *, json_mode: bool) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": request.model or self.model,
             "temperature": request.temperature
             if request.temperature is not None
             else self._config.temperature,

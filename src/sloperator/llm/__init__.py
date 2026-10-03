@@ -9,6 +9,7 @@ from sloperator.llm.backends import (
     OpenAICompatibleBackend,
     StructuredOutputError,
 )
+from sloperator.llm.routing import ResolvedRoute, RoleRouter, UnknownRoleError
 
 __all__ = [
     "BackendUnavailableError",
@@ -17,5 +18,8 @@ __all__ = [
     "LlmRequest",
     "LlmResponse",
     "OpenAICompatibleBackend",
+    "ResolvedRoute",
+    "RoleRouter",
     "StructuredOutputError",
+    "UnknownRoleError",
 ]
