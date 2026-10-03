@@ -128,6 +128,7 @@ class GithubAdapter:
             metadata={
                 "comment_id": comment_id,
                 "html_url": str(item.get("html_url") or ""),
+                "issue_url": self._text(item, "issue_url") or "",
             },
         )
 

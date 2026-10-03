@@ -156,8 +156,8 @@ class EventDao:
                    id, source_id, source_type, external_id, project_id,
                    event_type, timestamp, actor_id, author_key, subject,
                    body, reply_to, content_hash, metadata_json, raw_stored,
-                   ingested_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   ingested_at, references_json
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event.id,
                 event.source_id,
@@ -175,9 +175,20 @@ class EventDao:
                 json.dumps(event.metadata),
                 int(raw_stored),
                 to_db_time(utc_now()),
+                json.dumps(event.references),
             ),
         )
         return cur.rowcount > 0
+
+    @staticmethod
+    def list_for_project(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.Row]:
+        """All project events in causal-ish (timestamp, id) order."""
+        return list(
+            conn.execute(
+                "SELECT * FROM events WHERE project_id = ? ORDER BY timestamp, id",
+                (project_id,),
+            ).fetchall()
+        )
 
     @staticmethod
     def get(conn: sqlite3.Connection, event_id: str) -> sqlite3.Row | None:
@@ -193,5 +204,91 @@ class EventDao:
             conn.execute(
                 "SELECT * FROM events WHERE project_id = ? AND content_hash = ?",
                 (project_id, content_hash),
+            ).fetchall()
+        )
+
+
+class ThreadDao:
+    """Thread graph writes; reconstruction rebuilds per project atomically."""
+
+    @staticmethod
+    def clear_project(conn: sqlite3.Connection, project_id: str) -> None:
+        conn.execute(
+            "DELETE FROM thread_events WHERE thread_id IN "
+            "(SELECT id FROM threads WHERE project_id = ?)",
+            (project_id,),
+        )
+        conn.execute("DELETE FROM threads WHERE project_id = ?", (project_id,))
+
+    @staticmethod
+    def insert(
+        conn: sqlite3.Connection,
+        *,
+        project_id: str,
+        root_event_id: str | None,
+        subject: str | None,
+        started_at: datetime,
+        last_activity_at: datetime,
+        status: str = "active",
+    ) -> int:
+        cur = conn.execute(
+            """INSERT INTO threads (
+                   project_id, root_event_id, subject, status,
+                   started_at, last_activity_at
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                project_id,
+                root_event_id,
+                subject,
+                status,
+                to_db_time(started_at),
+                to_db_time(last_activity_at),
+            ),
+        )
+        row_id = cur.lastrowid
+        assert row_id is not None
+        return int(row_id)
+
+    @staticmethod
+    def link(
+        conn: sqlite3.Connection,
+        *,
+        thread_id: int,
+        event_id: str,
+        relationship: str,
+        confidence: float,
+        basis: list[str],
+    ) -> None:
+        conn.execute(
+            """INSERT OR REPLACE INTO thread_events (
+                   thread_id, event_id, relationship, confidence, basis_json
+               ) VALUES (?, ?, ?, ?, ?)""",
+            (thread_id, event_id, relationship, confidence, json.dumps(basis)),
+        )
+
+    @staticmethod
+    def touch(conn: sqlite3.Connection, thread_id: int, last_activity_at: datetime) -> None:
+        conn.execute(
+            "UPDATE threads SET last_activity_at = ? WHERE id = ?",
+            (to_db_time(last_activity_at), thread_id),
+        )
+
+    @staticmethod
+    def list_for_project(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.Row]:
+        return list(
+            conn.execute(
+                "SELECT * FROM threads WHERE project_id = ? ORDER BY started_at, id",
+                (project_id,),
+            ).fetchall()
+        )
+
+    @staticmethod
+    def members(conn: sqlite3.Connection, thread_id: int) -> list[sqlite3.Row]:
+        return list(
+            conn.execute(
+                """SELECT te.*, e.timestamp FROM thread_events te
+                   JOIN events e ON e.id = te.event_id
+                   WHERE te.thread_id = ? ORDER BY e.timestamp""",
+                (thread_id,),
             ).fetchall()
         )

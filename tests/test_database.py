@@ -75,19 +75,19 @@ def seed_source(conn: sqlite3.Connection) -> None:
 
 def test_migrate_creates_full_schema(db: Database) -> None:
     applied = db.migrate()
-    assert applied == (1,)
+    assert applied == (1, 2)
     tables = {
         row["name"]
         for row in db.connect().execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
     assert tables >= EXPECTED_TABLES
-    assert current_version(db.connect()) == 1
+    assert current_version(db.connect()) == 2
 
 
 def test_migrate_is_idempotent(db: Database) -> None:
     db.migrate()
     assert db.migrate() == ()
-    assert current_version(db.connect()) == 1
+    assert current_version(db.connect()) == 2
 
 
 def test_foreign_keys_are_enforced(db: Database) -> None:

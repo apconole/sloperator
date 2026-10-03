@@ -6,6 +6,7 @@ from sloperator.database.dao import (
     ProjectDao,
     RepositoryDao,
     SourceDao,
+    ThreadDao,
     from_db_time,
     to_db_time,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "ProjectDao",
     "RepositoryDao",
     "SourceDao",
+    "ThreadDao",
     "apply_migrations",
     "current_version",
     "from_db_time",
