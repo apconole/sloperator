@@ -286,7 +286,7 @@ class ThreadDao:
     def members(conn: sqlite3.Connection, thread_id: int) -> list[sqlite3.Row]:
         return list(
             conn.execute(
-                """SELECT te.*, e.timestamp FROM thread_events te
+                """SELECT te.*, e.timestamp, e.subject, e.body FROM thread_events te
                    JOIN events e ON e.id = te.event_id
                    WHERE te.thread_id = ? ORDER BY e.timestamp""",
                 (thread_id,),
