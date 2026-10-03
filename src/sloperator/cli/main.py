@@ -18,6 +18,7 @@ from sloperator.config.models import (
     MboxSourceConfig,
     NntpSourceConfig,
     PipermailSourceConfig,
+    Urgency,
 )
 from sloperator.config.secrets import SecretStore
 from sloperator.database.dao import ProjectDao
@@ -336,6 +337,51 @@ def show_artifact(ctx: AppContext, artifact_id: int, content: bool) -> None:
     if content:
         click.echo("---")
         click.echo(record.read())
+
+
+@main.command()
+@click.option("--project", "project_ids", multiple=True, help="Only brief these projects.")
+@click.pass_obj
+def brief(ctx: AppContext, project_ids: tuple[str, ...]) -> None:
+    """Generate the daily briefing artifact and notifications."""
+    from sloperator.artifacts.store import ArtifactStore
+    from sloperator.notify.briefing import DailyBriefing
+
+    store = ArtifactStore(ctx.db, ctx.config.paths.artifacts)
+    briefing = DailyBriefing(ctx.db, store, ctx.config)
+    targets = [p for p in ctx.config.projects if not project_ids or p in project_ids]
+    if not targets:
+        raise click.ClickException("no projects matched")
+    for project_id in targets:
+        result = briefing.generate(project_id)
+        click.echo(
+            f"{project_id}: events={result.new_events} threads={result.active_threads} "
+            f"open_items={result.open_action_items} requests={result.outstanding_requests} "
+            f"artifact=#{result.artifact.id} notifications={result.notifications}"
+        )
+
+
+@main.command()
+@click.option(
+    "--min-urgency",
+    type=click.Choice([u.value for u in Urgency]),
+    default=None,
+)
+@click.option("--undelivered", is_flag=True, help="Only notifications not yet delivered.")
+@click.pass_obj
+def notifications(ctx: AppContext, min_urgency: str | None, undelivered: bool) -> None:
+    """List principal notifications."""
+    from sloperator.artifacts.store import ArtifactStore
+    from sloperator.notify.briefing import DailyBriefing
+
+    store = ArtifactStore(ctx.db, ctx.config.paths.artifacts)
+    briefing = DailyBriefing(ctx.db, store, ctx.config)
+    rows = briefing.list_notifications(
+        min_urgency=Urgency(min_urgency) if min_urgency else None,
+        undelivered_only=undelivered,
+    )
+    for row in rows:
+        click.echo(f"#{row['id']} [{row['urgency']}] {row['created_at']}  {row['title']}")
 
 
 def _fetch(ctx: AppContext, sql: str, params: tuple[Any, ...]) -> list[Any]:
