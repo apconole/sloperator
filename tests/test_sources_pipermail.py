@@ -10,6 +10,7 @@ import pytest
 
 from sloperator.config.models import PipermailSourceConfig
 from sloperator.events import SourceHealthStatus
+from sloperator.months import month_tag, parse_month_tag
 from sloperator.sources.pipermail import PipermailAdapter, current_month_tag
 
 BASE = "http://archive.example.org/pipermail/dev"
@@ -168,3 +169,55 @@ def test_health_check(config: PipermailSourceConfig) -> None:
 
     broken = PipermailAdapter(config, client=make_client({}))
     assert broken.health_check().status is SourceHealthStatus.DOWN
+
+
+def _shift(months: int) -> str:
+    now = datetime.now(UTC)
+    index = now.year * 12 + (now.month - 1) - months
+    return month_tag(index // 12, index % 12 + 1)
+
+
+def _spec(months: int) -> str:
+    year, month = parse_month_tag(_shift(months)) or (0, 0)
+    return f"{year:04d}-{month:02d}"
+
+
+def test_start_month_backfills_and_closes_past_months(config: PipermailSourceConfig) -> None:
+    old, middle = _shift(2), _shift(1)
+    files = {
+        f"/pipermail/dev/{old}.txt": _mbox_bytes("o1"),
+        f"/pipermail/dev/{middle}.txt": _mbox_bytes("m1"),
+        f"/pipermail/dev/{MONTH}.txt": _mbox_bytes("c1"),
+    }
+    adapter = PipermailAdapter(
+        config.model_copy(update={"start_month": _spec(2)}), client=make_client(files)
+    )
+    first = adapter.poll(None)
+    assert [e.external_id for e in first.events] == [
+        "o1@dev.example.org",
+        "m1@dev.example.org",
+        "c1@dev.example.org",
+    ]
+    assert first.cursor == f"{MONTH}@{len(files[f'/pipermail/dev/{MONTH}.txt'])}"
+
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path in files:
+            return httpx.Response(200, content=files[request.url.path])
+        return httpx.Response(404, text="missing")
+
+    second = PipermailAdapter(config, client=httpx.Client(transport=httpx.MockTransport(handler)))
+    result = second.poll(first.cursor)
+    assert result.events == []
+    assert requested == [f"/pipermail/dev/{MONTH}.txt.gz", f"/pipermail/dev/{MONTH}.txt"]
+
+
+def test_missing_months_are_skipped(config: PipermailSourceConfig) -> None:
+    files = {f"/pipermail/dev/{MONTH}.txt": _mbox_bytes("c1")}
+    adapter = PipermailAdapter(
+        config.model_copy(update={"start_month": _spec(1)}), client=make_client(files)
+    )
+    result = adapter.poll(None)
+    assert [e.external_id for e in result.events] == ["c1@dev.example.org"]

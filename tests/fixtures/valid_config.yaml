@@ -30,6 +30,7 @@ sources:
     type: pipermail
     project: example
     base_url: https://lists.example.org/pipermail/example/
+    start_month: 2026-01
   - id: project-github
     type: github
     project: example

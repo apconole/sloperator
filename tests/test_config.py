@@ -235,3 +235,29 @@ def test_urgency_severity_ordering() -> None:
     ]
     assert severities == sorted(severities)
     assert len(set(severities)) == 4
+
+
+def test_pipermail_start_month_is_normalized_and_validated() -> None:
+    source = PipermailSourceConfig(
+        id="s", project="p", type="pipermail", base_url="https://l.example.org/pipermail/p/"
+    )
+    assert source.start_month is None
+
+    dated = PipermailSourceConfig(
+        id="s",
+        project="p",
+        type="pipermail",
+        base_url="https://l.example.org/pipermail/p/",
+        start_month="2026-3",
+    )
+    assert dated.start_month == "2026-03"
+
+    for bad in ("2026-13", "March 2026", "2099-01", "1990-01"):
+        with pytest.raises(ValidationError):
+            PipermailSourceConfig(
+                id="s",
+                project="p",
+                type="pipermail",
+                base_url="https://l.example.org/pipermail/p/",
+                start_month=bad,
+            )

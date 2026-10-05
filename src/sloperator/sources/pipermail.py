@@ -9,7 +9,6 @@ last ingested HTML page name, so polling only reads what is newer.
 
 from __future__ import annotations
 
-import calendar
 import gzip
 import html
 import logging
@@ -22,6 +21,13 @@ import httpx
 
 from sloperator.config.models import PipermailSourceConfig
 from sloperator.events import Actor, SourceEvent, SourceHealth, SourceHealthStatus
+from sloperator.months import (
+    current_month_tag,
+    month_range,
+    month_tag,
+    parse_month_spec,
+    parse_month_tag,
+)
 from sloperator.sources import PollResult
 from sloperator.sources.addresses import deobfuscate_address
 from sloperator.sources.mbox import parse_message, split_messages
@@ -37,18 +43,15 @@ _DATE_FORMATS = (
 )
 
 
+_DONE = "done"
+
+
 class _NoMbox(Exception):
     """Raised when a month has no published mbox download."""
 
 
-def month_tag(year: int, month: int) -> str:
-    """Archive directory/download name for a month, e.g. ``2026-October``."""
-    return f"{year}-{calendar.month_name[month]}"
-
-
-def current_month_tag(now: datetime | None = None) -> str:
-    now = now or datetime.now(UTC)
-    return month_tag(now.year, now.month)
+class _NoArchive(Exception):
+    """Raised when a month does not exist in the archive at all."""
 
 
 def _split_cursor(cursor: str) -> tuple[str, str]:
@@ -188,6 +191,7 @@ class PipermailAdapter:
     def __init__(self, config: PipermailSourceConfig, client: httpx.Client | None = None):
         self.source_id = config.id
         self._base_url = str(config.base_url).rstrip("/")
+        self._start_month = config.start_month
         self._owns_client = client is None
         self._client = client if client is not None else httpx.Client(timeout=30.0)
 
@@ -212,7 +216,12 @@ class PipermailAdapter:
 
     def _mbox_month(self, tag: str, part: str | None, events: list[SourceEvent]) -> str:
         """Append messages newer than the offset in ``part``; return new part."""
-        data = self._fetch_mbox(tag)
+        try:
+            data = self._fetch_mbox(tag)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise _NoArchive from exc
+            raise
         if data is None:
             raise _NoMbox
         offset = int(part) if (part or "").isdigit() else 0
@@ -223,6 +232,8 @@ class PipermailAdapter:
 
     def _list_pages(self, tag: str) -> list[str]:
         response = self._client.get(self._month_url(f"{tag}/date.html"))
+        if response.status_code == 404:
+            raise _NoArchive
         response.raise_for_status()
         return sorted(set(_PAGE_LINK.findall(response.text)))
 
@@ -238,15 +249,44 @@ class PipermailAdapter:
             last = page
         return last or ""
 
+    def _months_to_poll(self, cursor: str | None) -> list[str]:
+        """Months to visit this round, oldest first, ending with the current one.
+
+        Without a configured ``start_month`` only the current month is polled;
+        with one, the archive is backfilled from that month onward. A cursor
+        pointing at an older month (for example because ``start_month`` was
+        added later) also drags the sweep back to that month.
+        """
+        start = parse_month_spec(self._start_month) if self._start_month else None
+        if cursor and "@" in cursor:
+            cursor_month = parse_month_tag(_split_cursor(cursor)[0])
+            if cursor_month is not None and (start is None or cursor_month < start):
+                start = cursor_month
+        if start is None:
+            return [current_month_tag()]
+        return [month_tag(year, month) for year, month in month_range(start)]
+
     def poll(self, cursor: str | None) -> PollResult:
-        tag = current_month_tag()
-        part = _cursor_part(cursor, tag)
+        current = current_month_tag()
         events: list[SourceEvent] = []
-        try:
-            new_part = self._mbox_month(tag, part, events)
-        except _NoMbox:
-            new_part = self._html_month(tag, part, events)
-        return PollResult(events=events, cursor=f"{tag}@{new_part}")
+        new_cursor = cursor
+        for tag in self._months_to_poll(cursor):
+            part = _cursor_part(cursor, tag)
+            if part == _DONE:
+                continue
+            try:
+                try:
+                    new_part = self._mbox_month(tag, part, events)
+                except _NoMbox:
+                    new_part = self._html_month(tag, part, events)
+            except _NoArchive:
+                logger.debug("no archive for %s/%s", self.source_id, tag)
+                continue
+            # Closed months never change again; record them as finished so
+            # later polls do not re-download every historical mbox.
+            finished = new_part if tag == current else _DONE
+            new_cursor = f"{tag}@{finished}"
+        return PollResult(events=events, cursor=new_cursor)
 
     def health_check(self) -> SourceHealth:
         now = datetime.now(UTC)

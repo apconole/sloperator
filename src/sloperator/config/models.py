@@ -13,6 +13,7 @@ persisted.
 from __future__ import annotations
 
 import itertools
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -20,6 +21,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from sloperator.months import parse_month_spec
 from sloperator.security.network import host_of, is_host_allowed
 
 
@@ -150,16 +152,38 @@ class NntpSourceConfig(SourceConfig):
 
 
 class PipermailSourceConfig(SourceConfig):
-    """Read a Pipermail/HyperKitty-style HTML archive."""
+    """Read a Pipermail-style HTML/mbox archive.
+
+    ``base_url`` points at the list archive root (the page listing months);
+    adapters derive per-month paths from it. ``start_month`` (``YYYY-MM``)
+    additionally backfills months from that month onward on first run.
+    """
 
     type: Literal["pipermail"]
     base_url: str = Field(min_length=1)
+    start_month: str | None = None
     polling_interval_seconds: int = Field(default=300, ge=30)
 
     @field_validator("base_url")
     @classmethod
     def _check_base_url(cls, value: str) -> str:
         return _require_http_url(value, "sources[].base_url")
+
+    @field_validator("start_month")
+    @classmethod
+    def _check_start_month(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parsed = parse_month_spec(value)
+        if parsed is None:
+            raise ValueError(f"sources[].start_month must be a YYYY-MM month, got {value!r}")
+        year, month = parsed
+        now = datetime.now(UTC)
+        if year < 1995:
+            raise ValueError(f"sources[].start_month is too old: {value!r}")
+        if (year, month) > (now.year, now.month):
+            raise ValueError(f"sources[].start_month must not be in the future: {value!r}")
+        return f"{year:04d}-{month:02d}"
 
 
 class GithubSourceConfig(SourceConfig):
