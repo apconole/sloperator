@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from email import policy
 from email.message import EmailMessage
@@ -78,7 +79,7 @@ def _message_id(raw: bytes, headers: dict[str, str]) -> str:
     return "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
-def parse_message(raw: bytes, source_id: str) -> SourceEvent:
+def parse_message(raw: bytes, source_id: str, source_type: str = "mbox") -> SourceEvent:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
     headers = _raw_headers(msg)
     author_name, author_email = parseaddr(deobfuscate_address(headers.get("from")) or "")
@@ -87,7 +88,7 @@ def parse_message(raw: bytes, source_id: str) -> SourceEvent:
     reply_to = _clean_id(in_reply_to) if in_reply_to else None
     return SourceEvent(
         source_id=source_id,
-        source_type="mbox",
+        source_type=source_type,
         external_id=_message_id(raw, headers),
         timestamp=_parse_date(headers.get("date")),
         author=Actor(name=author_name or None, email=author_email or None),
@@ -97,6 +98,21 @@ def parse_message(raw: bytes, source_id: str) -> SourceEvent:
         reply_to=reply_to,
         metadata={"content_type": msg.get_content_type()},
     )
+
+
+def split_messages(data: bytes, start: int = 0) -> Iterator[tuple[bytes, int]]:
+    """Yield ``(raw_bytes, end_offset)`` for messages at or after ``start``.
+
+    Messages are delimited by the unquoted ``From `` transport separator; the
+    returned offset is the end of each message so callers can resume exactly
+    where parsing stopped.
+    """
+    boundaries = [m.start() for m in _SEPARATOR.finditer(data)]
+    for index, position in enumerate(boundaries):
+        if position < start:
+            continue
+        end = boundaries[index + 1] if index + 1 < len(boundaries) else len(data)
+        yield data[position:end], end
 
 
 class MboxAdapter:
@@ -111,14 +127,9 @@ class MboxAdapter:
     def poll(self, cursor: str | None) -> PollResult:
         data = self._path.read_bytes()
         start = int(cursor) if cursor else 0
-        boundaries = [m.start() for m in _SEPARATOR.finditer(data)]
         events: list[SourceEvent] = []
         new_cursor = start
-        for index, position in enumerate(boundaries):
-            if position < start:
-                continue
-            end = boundaries[index + 1] if index + 1 < len(boundaries) else len(data)
-            chunk = data[position:end]
+        for chunk, end in split_messages(data, start):
             events.append(parse_message(chunk, self.source_id))
             new_cursor = end
         return PollResult(events=events, cursor=str(new_cursor))

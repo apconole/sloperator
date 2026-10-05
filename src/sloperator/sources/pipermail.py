@@ -1,13 +1,16 @@
-"""Pipermail/HyperKitty-style HTML archive source adapter.
+"""Pipermail-style mailing list archive source adapter.
 
-Reads ``date.html`` for the ordered list of message pages (pipermail names
-them 000000.html, 000001.html, ...), then fetches each new page and extracts
-headers and body from the archive markup. The cursor is the last ingested
-page filename, so polling only fetches what is newer.
+Monthly mbox downloads (``YYYY-Month.txt.gz``) are the primary ingestion path
+because they keep real headers; the HTML ``date.html`` listing of a month is
+only used when no mbox download is published for it. The cursor is
+``YYYY-Month@position``, where position is a byte offset into the mbox or the
+last ingested HTML page name, so polling only reads what is newer.
 """
 
 from __future__ import annotations
 
+import calendar
+import gzip
 import html
 import logging
 import re
@@ -21,6 +24,7 @@ from sloperator.config.models import PipermailSourceConfig
 from sloperator.events import Actor, SourceEvent, SourceHealth, SourceHealthStatus
 from sloperator.sources import PollResult
 from sloperator.sources.addresses import deobfuscate_address
+from sloperator.sources.mbox import parse_message, split_messages
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,33 @@ _DATE_FORMATS = (
     "%a %b %d %H:%M:%S %z %Y",
     "%a, %d %b %Y %H:%M:%S %z",
 )
+
+
+class _NoMbox(Exception):
+    """Raised when a month has no published mbox download."""
+
+
+def month_tag(year: int, month: int) -> str:
+    """Archive directory/download name for a month, e.g. ``2026-October``."""
+    return f"{year}-{calendar.month_name[month]}"
+
+
+def current_month_tag(now: datetime | None = None) -> str:
+    now = now or datetime.now(UTC)
+    return month_tag(now.year, now.month)
+
+
+def _split_cursor(cursor: str) -> tuple[str, str]:
+    tag, _, part = cursor.rpartition("@")
+    return tag, part
+
+
+def _cursor_part(cursor: str | None, tag: str) -> str | None:
+    """Return the resume position for ``tag``, or None if the cursor is elsewhere."""
+    if not cursor or "@" not in cursor:
+        return None
+    cursor_tag, part = _split_cursor(cursor)
+    return part if cursor_tag == tag else None
 
 
 class _PageParser(HTMLParser):
@@ -144,7 +175,13 @@ def parse_page(markup: str, source_id: str, page: str) -> SourceEvent:
 
 
 class PipermailAdapter:
-    """Incremental reader for a pipermail-style HTML archive."""
+    """Incremental reader for a pipermail-style archive.
+
+    Monthly mbox downloads (``YYYY-Month.txt.gz``, falling back to
+    ``YYYY-Month.txt``) are preferred because they carry real headers, so
+    threading and authorship survive. HTML ``date.html`` listing pages are only
+    used for months whose mbox download is not published.
+    """
 
     source_type = "pipermail"
 
@@ -158,30 +195,71 @@ class PipermailAdapter:
         if self._owns_client:
             self._client.close()
 
-    def _list_pages(self) -> list[str]:
-        response = self._client.get(f"{self._base_url}/date.html")
-        response.raise_for_status()
-        pages = sorted(set(_PAGE_LINK.findall(response.text)))
-        return pages
+    def _month_url(self, name: str) -> str:
+        return f"{self._base_url}/{name}"
 
-    def poll(self, cursor: str | None) -> PollResult:
-        pages = self._list_pages()
-        events: list[SourceEvent] = []
-        new_cursor = cursor
-        for page in pages:
-            if cursor is not None and page <= cursor:
+    def _fetch_mbox(self, tag: str) -> bytes | None:
+        """Return the monthly mbox body, or None when the archive has none."""
+        for name in (f"{tag}.txt.gz", f"{tag}.txt"):
+            response = self._client.get(self._month_url(name))
+            if response.status_code == 404:
                 continue
-            response = self._client.get(f"{self._base_url}/{page}")
+            response.raise_for_status()
+            if name.endswith(".gz"):
+                return gzip.decompress(response.content)
+            return response.content
+        return None
+
+    def _mbox_month(self, tag: str, part: str | None, events: list[SourceEvent]) -> str:
+        """Append messages newer than the offset in ``part``; return new part."""
+        data = self._fetch_mbox(tag)
+        if data is None:
+            raise _NoMbox
+        offset = int(part) if (part or "").isdigit() else 0
+        for chunk, end in split_messages(data, offset):
+            events.append(parse_message(chunk, self.source_id, self.source_type))
+            offset = end
+        return str(offset)
+
+    def _list_pages(self, tag: str) -> list[str]:
+        response = self._client.get(self._month_url(f"{tag}/date.html"))
+        response.raise_for_status()
+        return sorted(set(_PAGE_LINK.findall(response.text)))
+
+    def _html_month(self, tag: str, part: str | None, events: list[SourceEvent]) -> str:
+        """Fall back to HTML pages for a month without an mbox download."""
+        last = part if part and not part.isdigit() else None
+        for page in self._list_pages(tag):
+            if last is not None and page <= last:
+                continue
+            response = self._client.get(self._month_url(f"{tag}/{page}"))
             response.raise_for_status()
             events.append(parse_page(response.text, self.source_id, page))
-            new_cursor = page
-        return PollResult(events=events, cursor=new_cursor)
+            last = page
+        return last or ""
+
+    def poll(self, cursor: str | None) -> PollResult:
+        tag = current_month_tag()
+        part = _cursor_part(cursor, tag)
+        events: list[SourceEvent] = []
+        try:
+            new_part = self._mbox_month(tag, part, events)
+        except _NoMbox:
+            new_part = self._html_month(tag, part, events)
+        return PollResult(events=events, cursor=f"{tag}@{new_part}")
 
     def health_check(self) -> SourceHealth:
         now = datetime.now(UTC)
+        tag = current_month_tag()
         try:
-            response = self._client.get(f"{self._base_url}/date.html")
-            response.raise_for_status()
+            for name in (f"{tag}.txt.gz", f"{tag}.txt", f"{tag}/date.html"):
+                response = self._client.get(self._month_url(name))
+                if response.status_code == 404:
+                    continue
+                response.raise_for_status()
+                return SourceHealth(
+                    source_id=self.source_id, status=SourceHealthStatus.OK, checked_at=now
+                )
         except httpx.HTTPError as exc:
             return SourceHealth(
                 source_id=self.source_id,
@@ -189,4 +267,9 @@ class PipermailAdapter:
                 checked_at=now,
                 detail=str(exc),
             )
-        return SourceHealth(source_id=self.source_id, status=SourceHealthStatus.OK, checked_at=now)
+        return SourceHealth(
+            source_id=self.source_id,
+            status=SourceHealthStatus.DOWN,
+            checked_at=now,
+            detail=f"no mbox or HTML archive found for {tag}",
+        )
