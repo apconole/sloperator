@@ -98,3 +98,22 @@ def test_health_states(config: MboxSourceConfig, tmp_path: Path) -> None:
 
     Path(config.path).write_bytes(_msg("h@example.org", "a@example.org", "s", "b"))
     assert adapter.health_check().status is SourceHealthStatus.OK
+
+
+def test_parse_message_restores_pipermail_obfuscated_from() -> None:
+    raw = _msg(
+        "m1@example.org",
+        "aconole at redhat.com (Aaron Conole)",
+        "patch",
+        "body",
+    )
+    event = parse_message(raw, "proj-mbox")
+    assert event.author is not None
+    assert event.author.email == "aconole@redhat.com"
+    assert event.author.name == "Aaron Conole"
+
+
+def test_parse_message_leaves_real_addresses_untouched() -> None:
+    raw = _msg("m2@example.org", "Jane Doe <jane@example.org>", "s", "b")
+    event = parse_message(raw, "proj-mbox")
+    assert event.author is not None and event.author.email == "jane@example.org"

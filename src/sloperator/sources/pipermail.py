@@ -20,6 +20,7 @@ import httpx
 from sloperator.config.models import PipermailSourceConfig
 from sloperator.events import Actor, SourceEvent, SourceHealth, SourceHealthStatus
 from sloperator.sources import PollResult
+from sloperator.sources.addresses import deobfuscate_address
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +118,7 @@ def parse_page(markup: str, source_id: str, page: str) -> SourceEvent:
     parser = _PageParser()
     parser.feed(markup)
 
-    from_text = parser.headers.get("from", "").strip()
+    from_text = deobfuscate_address(parser.headers.get("from", "").strip()) or ""
     name, email = parseaddr(from_text)
     if "@" not in email and parser.mailto:
         name = name or from_text

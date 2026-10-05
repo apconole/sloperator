@@ -20,6 +20,7 @@ from pathlib import Path
 from sloperator.config.models import MboxSourceConfig
 from sloperator.events import Actor, SourceEvent, SourceHealth, SourceHealthStatus
 from sloperator.sources import PollResult
+from sloperator.sources.addresses import deobfuscate_address
 
 _SEPARATOR = re.compile(rb"^From ", re.MULTILINE)
 
@@ -60,8 +61,18 @@ def _clean_id(value: str) -> str:
     return value.strip().removeprefix("<").removesuffix(">")
 
 
-def _message_id(raw: bytes, msg: EmailMessage) -> str:
-    header = _decode(msg.get("Message-ID"))
+def _raw_headers(msg: EmailMessage) -> dict[str, str]:
+    """Header values exactly as written on the wire.
+
+    Structured header parsing (``policy.default``) discards address comments,
+    which is where pipermail keeps the display name of a mangled author, so
+    identity headers are read from the raw values instead.
+    """
+    return {name.lower(): value for name, value in msg.raw_items()}
+
+
+def _message_id(raw: bytes, headers: dict[str, str]) -> str:
+    header = headers.get("message-id")
     if header:
         return _clean_id(header)
     return "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -69,16 +80,16 @@ def _message_id(raw: bytes, msg: EmailMessage) -> str:
 
 def parse_message(raw: bytes, source_id: str) -> SourceEvent:
     msg = BytesParser(policy=policy.default).parsebytes(raw)
-    author_name, author_email = parseaddr(_decode(msg.get("From")) or "")
-    references_raw = _decode(msg.get("References"))
-    references = [_clean_id(ref) for ref in references_raw.split()] if references_raw else []
-    in_reply_to = _decode(msg.get("In-Reply-To"))
+    headers = _raw_headers(msg)
+    author_name, author_email = parseaddr(deobfuscate_address(headers.get("from")) or "")
+    references = [_clean_id(ref) for ref in headers.get("references", "").split()]
+    in_reply_to = headers.get("in-reply-to")
     reply_to = _clean_id(in_reply_to) if in_reply_to else None
     return SourceEvent(
         source_id=source_id,
         source_type="mbox",
-        external_id=_message_id(raw, msg),
-        timestamp=_parse_date(msg.get("Date")),
+        external_id=_message_id(raw, headers),
+        timestamp=_parse_date(headers.get("date")),
         author=Actor(name=author_name or None, email=author_email or None),
         subject=_decode(msg.get("Subject")),
         body=_body(msg),
